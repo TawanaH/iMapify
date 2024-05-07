@@ -1,7 +1,3 @@
-/*
--Need to get location from browser, then we can start cooking
-*/
-
 const express = require('express');
 const {Client} = require('pg');
 const {google} = require('googleapis');
@@ -9,7 +5,7 @@ const {OAuth2} = google.auth;
 require('dotenv').config();
 const app = express();
 const PORT = process.env.PORT || 4000;
-const username = "TawanaH"
+const bodyParser = require('body-parser');
 
 const oauth2Client = new google.auth.OAuth2(
     process.env.CLIENT_ID,
@@ -27,9 +23,9 @@ const client = new Client({
 
 client.connect((err)=>{
     if(err){
-        console.log(err)
+        console.log('Error:', err);
     }
-    console.log('client has connected')
+    console.log('Database connected');
 });
 
 client.on('notice', (msg) => console.warn('notice:', msg))
@@ -71,6 +67,8 @@ oauth2Client.on('tokens', async (tokens) => {
 //===================================MIDDLEWARE=======================================
 
 app.use(express.json());
+
+app.use(bodyParser.urlencoded({ extended: true }));
 
 const isAuthenticated = (req, res, next) => {
     const credentialsAreSet = oauth2Client.credentials && oauth2Client.credentials.access_token;
@@ -158,8 +156,80 @@ app.get('/home', async (req, res) => {
 });
 
 app.get('/dashboard', isAuthenticated, (req, res) => {
+    //Render dashboard
     res.send('Dashboard!')
 });
+
+//Returns events for next 24 hours
+app.get('/get-events', isAuthenticated, async (req, res) => {
+    try {
+        const calendar = google.calendar({ version: 'v3', auth: oauth2Client });
+
+        // Get the current date-time in ISO format and add 24 hours for timeMax
+        const now = new Date();
+        const timeMin = now.toISOString(); // Current date-time in ISO format
+        const tomorrow = new Date(now.getTime() + 24 * 60 * 60 * 1000); // Current time + 24 hours
+        const timeMax = tomorrow.toISOString();
+
+        calendar.events.list({
+            calendarId: 'primary',
+            timeMin: timeMin, // Current time
+            timeMax: timeMax, // 24 hours from now
+            singleEvents: true,
+            orderBy: 'startTime'
+        }, (err, response) => {
+            if (err) {
+                console.error('The API returned an error: ' + err);
+                return res.status(500).send('Error retrieving calendar events');
+            }
+            const events = response.data.items;
+            if (events.length) {
+                console.log('Upcoming events:', events);
+                res.json(events); // Send events as JSON
+            } else {
+                console.log('No upcoming events found.');
+                res.send('No upcoming events found.');
+            }
+        });
+    } catch (error) {
+        console.error('Error accessing Calendar API:', error);
+        res.status(500).send('Failed to access Calendar API');
+    }
+});
+
+app.post('/submit-address', isAuthenticated,async (req, res) => {
+    const oauth2 = google.oauth2({
+        auth: oauth2Client,
+        version: 'v2'
+    });
+
+    oauth2.userinfo.get(async (err, userInfoResponse) => {
+        if (err) {
+            console.error('Failed to retrieve user info:', err);
+            return res.status(500).send('Failed to retrieve user information');
+        }
+
+        const userEmail = userInfoResponse.data.email;
+        const { address1, address2, city, province, postalCode } = req.body;
+        const fullAddress = `${address1} ${address2}, ${city}, ${province}, ${postalCode}`;
+
+        try {
+            // Update the address for the user identified by the email
+            const query = 'UPDATE users SET address = $1 WHERE email = $2';
+            const result = await client.query(query, [fullAddress, userEmail]);
+
+            if (result.rowCount > 0) {
+                res.send('Address updated successfully');
+            } else {
+                res.send('No user found or address not updated');
+            }
+        } catch (dbErr) {
+            console.error('Database error:', dbErr);
+            res.status(500).send('Failed to update address');
+        }
+    });
+});
+
 
 app.listen(PORT, err => {
     if(err) console.log(err)
